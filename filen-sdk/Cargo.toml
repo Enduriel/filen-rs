@@ -13,6 +13,7 @@ hex = "0.4.3"
 keyring = {version = "3.6.1", features = ["windows-native"]}
 pbkdf2 = "0.12.2"
 reqwest = {version = "0.12.12", features = ["blocking", "json"]}
+rsa = { version = "0.9.7", features = ["pem"] }
 serde = { version = "1.0.217", features = ["serde_derive"] }
 serde_json = "1.0.138"
 sha2 = "0.10.8"

@@ -5,6 +5,10 @@ use anyhow::{anyhow, Result};
 use base64::{prelude::BASE64_STANDARD, Engine};
 use generic_array::typenum::U12;
 use pbkdf2::hmac::Hmac;
+use rsa::{
+	pkcs1::{DecodeRsaPrivateKey, DecodeRsaPublicKey},
+	pkcs8::{DecodePrivateKey, DecodePublicKey},
+};
 use serde::Serialize;
 use sha2::{Digest, Sha512};
 
@@ -219,6 +223,42 @@ impl MasterKeys {
 			.collect::<Result<Vec<_>>>()?;
 		keys.insert(0, first_key); // not the most efficient, but simple
 		Ok(Self { keys })
+	}
+
+	pub fn decrypt_metadata(
+		&self,
+		encrypted_metadata: &str,
+		out_string: &mut String,
+	) -> Result<()> {
+		for key in &self.keys {
+			if key.decrypt_metadata(encrypted_metadata, out_string).is_ok() {
+				println!("Decrypted with key: {:?}", key.as_str());
+				return Ok(());
+			}
+		}
+		Err(anyhow!("Failed to decrypt metadata"))
+	}
+}
+
+pub struct RSAKeyPair {
+	private_key: rsa::RsaPrivateKey,
+	public_key: rsa::RsaPublicKey,
+}
+
+impl RSAKeyPair {
+	pub fn from_strings(
+		first_key: &MasterKeys,
+		encrypted_private_key: &str,
+		public_key: &str,
+	) -> Result<Self> {
+		let mut private_key = String::new();
+		first_key.decrypt_metadata(encrypted_private_key, &mut private_key)?;
+		Ok(Self {
+			private_key: rsa::RsaPrivateKey::from_pkcs8_der(&BASE64_STANDARD.decode(private_key)?)?,
+			public_key: rsa::RsaPublicKey::from_public_key_der(
+				&BASE64_STANDARD.decode(public_key)?,
+			)?,
+		})
 	}
 }
 

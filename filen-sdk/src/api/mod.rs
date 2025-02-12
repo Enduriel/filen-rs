@@ -3,7 +3,7 @@ use core::str;
 use anyhow::Result;
 use reqwest::RequestBuilder;
 
-use crate::crypto::{self, MasterKey, MasterKeys};
+use crate::crypto::{self, MasterKey, MasterKeys, RSAKeyPair};
 
 pub mod types;
 use types::*;
@@ -99,8 +99,7 @@ impl Unautharized for UnautharizedClient {
 pub struct AuthorizedClient {
 	client: reqwest::Client,
 	api_key: String,
-	private_key: String,
-	public_key: String,
+	key_pair: RSAKeyPair,
 	master_keys: MasterKeys,
 }
 
@@ -127,12 +126,13 @@ impl AuthorizedClient {
 		}
 
 		let master_keys_response: FilenResponse<MasterKeysData> = request.json().await?;
+		let master_keys = MasterKeys::new(master_key, &master_keys_response.into_data()?.keys)?;
+
 		Ok(Self {
 			client,
 			api_key,
-			private_key,
-			public_key,
-			master_keys: MasterKeys::new(master_key, &master_keys_response.into_data()?.keys)?,
+			key_pair: RSAKeyPair::from_strings(&master_keys, &private_key, &public_key)?,
+			master_keys,
 		})
 	}
 
