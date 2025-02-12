@@ -83,7 +83,7 @@ pub struct LoginData {
 	pub private_key: String,
 }
 
-// /v3/users/masterKeys
+// /v3/user/masterKeys
 #[derive(Serialize)]
 pub struct MasterKeysRequest<'a> {
 	#[serde(rename = "masterKeys")]
