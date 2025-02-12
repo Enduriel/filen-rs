@@ -7,7 +7,7 @@ async fn test_login() {
 	// dotenvy::dotenv().unwrap_or_default();
 
 	let client = api::UnautharizedClient::default();
-	let _ = client
+	let auth_client = client
 		.login(
 			&std::env::var("TEST_USER_PASSWORD").unwrap(),
 			&std::env::var("TEST_USER_EMAIL").unwrap(),
@@ -15,4 +15,7 @@ async fn test_login() {
 		)
 		.await
 		.unwrap();
+
+	let base_dir = auth_client.get_base_dir().await.unwrap();
+	let _ = auth_client.list_dir_contents(&base_dir).await.unwrap();
 }

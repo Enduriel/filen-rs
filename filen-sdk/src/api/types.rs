@@ -1,5 +1,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::fs::{Directory, EncryptedChildDirectory, EncryptedFile};
 
 #[derive(Deserialize, Debug)]
 #[serde(bound = "T: Deserialize<'de>")]
@@ -93,4 +96,35 @@ pub struct MasterKeysRequest<'a> {
 #[derive(Deserialize, Debug)]
 pub struct MasterKeysData {
 	pub keys: String,
+}
+
+// /v3/user/baseFolder
+#[derive(Deserialize, Debug)]
+pub struct BaseFolderData {
+	pub uuid: Uuid,
+}
+
+// /v3/dir/content
+#[derive(Serialize)]
+pub struct DirContentRequest {
+	uuid: Uuid,
+}
+
+impl<T> From<&T> for DirContentRequest
+where
+	T: Directory,
+{
+	fn from(value: &T) -> Self {
+		Self {
+			uuid: value.get_uuid(),
+		}
+	}
+}
+
+#[derive(Deserialize, Debug)]
+pub struct DirContentData {
+	#[serde(rename = "uploads")]
+	pub files: Vec<EncryptedFile>,
+	#[serde(rename = "folders")]
+	pub dirs: Vec<EncryptedChildDirectory>,
 }

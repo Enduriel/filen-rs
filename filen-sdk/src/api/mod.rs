@@ -1,14 +1,29 @@
 use core::str;
+use std::process::Child;
 
 use anyhow::Result;
 use reqwest::RequestBuilder;
+use uuid::Uuid;
 
-use crate::crypto::{self, MasterKey, MasterKeys, RSAKeyPair};
+use crate::{
+	crypto::{self, MasterKey, MasterKeys, RSAKeyPair},
+	fs::{ChildDirectory, Directory, EncryptedChildDirectory, File, RootDirectory},
+};
 
 pub mod types;
 use types::*;
 
-pub fn build_auth_request(
+fn build_get_auth_request(
+	client: &reqwest::Client,
+	url: &str,
+	api_key: &str,
+) -> reqwest::RequestBuilder {
+	client
+		.get(url)
+		.header("Authorization", format!("Bearer {}", api_key))
+}
+
+pub fn build_post_auth_request(
 	client: &reqwest::Client,
 	url: &str,
 	api_key: &str,
@@ -111,7 +126,7 @@ impl AuthorizedClient {
 		master_key: MasterKey,
 	) -> Result<Self> {
 		let client = reqwest::Client::new();
-		let request = build_auth_request(
+		let request = build_post_auth_request(
 			&client,
 			"https://gateway.filen.io/v3/user/masterKeys",
 			&api_key,
@@ -136,8 +151,52 @@ impl AuthorizedClient {
 		})
 	}
 
-	fn build_auth_request(&self, url: &str) -> RequestBuilder {
-		build_auth_request(&self.client, url, &self.api_key)
+	fn build_post_auth_request(&self, url: &str) -> RequestBuilder {
+		build_post_auth_request(&self.client, url, &self.api_key)
+	}
+
+	fn build_get_auth_request(&self, url: &str) -> RequestBuilder {
+		build_get_auth_request(&self.client, url, &self.api_key)
+	}
+
+	pub async fn get_base_dir(&self) -> Result<RootDirectory> {
+		Ok(self
+			.build_get_auth_request("https://gateway.filen.io/v3/user/baseFolder")
+			.send()
+			.await?
+			.json::<FilenResponse<BaseFolderData>>()
+			.await?
+			.into_data()?
+			.uuid
+			.into())
+	}
+
+	pub async fn list_dir_contents(
+		&self,
+		dir: &impl Directory,
+	) -> Result<(Vec<File>, Vec<ChildDirectory>)> {
+		let response = self
+			.build_post_auth_request("https://gateway.filen.io/v3/dir/content")
+			.json(&DirContentRequest::from(dir))
+			.send()
+			.await?;
+		// println!("{:?}", response.text().await?);
+		let response_data = response
+			.json::<FilenResponse<DirContentData>>()
+			.await?
+			.into_data()?;
+		Ok((
+			response_data
+				.files
+				.into_iter()
+				.map(|file| File::from_encrypted(file, &self.master_keys))
+				.collect::<Result<Vec<_>>>()?,
+			response_data
+				.dirs
+				.into_iter()
+				.map(|dir| ChildDirectory::from_encrypted(dir, &self.master_keys))
+				.collect::<Result<Vec<_>>>()?,
+		))
 	}
 }
 
