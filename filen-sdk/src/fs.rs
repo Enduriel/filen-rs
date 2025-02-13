@@ -106,7 +106,7 @@ pub struct EncryptedFile {
 }
 
 #[derive(Debug)]
-pub struct File {
+pub struct FileInfo {
 	uuid: Uuid,
 	metadata: Metadata,
 	rm: String,
@@ -120,18 +120,44 @@ pub struct File {
 	favorited: u8,
 }
 
+impl FileInfo {
+	pub fn get_uuid(&self) -> Uuid {
+		self.uuid
+	}
+
+	pub fn get_metadata(&self) -> &Metadata {
+		&self.metadata
+	}
+
+	pub fn get_chunks(&self) -> u64 {
+		self.chunks
+	}
+
+	pub fn get_region(&self) -> &str {
+		&self.region
+	}
+
+	pub fn get_bucket(&self) -> &str {
+		&self.bucket
+	}
+
+	pub fn get_key(&self) -> &BasicKey<32> {
+		&self.metadata.key
+	}
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Metadata {
 	name: String,
 	size: u64,
 	mime: String,
-	key: String,
+	key: BasicKey<32>,
 	#[serde(rename = "lastModified")]
 	#[serde(deserialize_with = "chrono::serde::ts_milliseconds::deserialize")]
 	last_modified: DateTime<Utc>,
 }
 
-impl File {
+impl FileInfo {
 	pub fn from_encrypted(encrypted: EncryptedFile, master_keys: &MasterKeys) -> Result<Self> {
 		// might be possible to optimize this to decrypt in place?
 		let mut metadata = String::new();

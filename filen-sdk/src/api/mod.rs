@@ -1,17 +1,35 @@
 use core::str;
-use std::process::Child;
+use std::{
+	io::{Seek, Write},
+	os::windows::fs::FileExt,
+	process::Child,
+};
 
 use anyhow::Result;
+use futures::{stream::FuturesUnordered, StreamExt};
 use reqwest::RequestBuilder;
 use uuid::Uuid;
 
 use crate::{
-	crypto::{self, MasterKey, MasterKeys, RSAKeyPair},
-	fs::{ChildDirectory, Directory, EncryptedChildDirectory, File, RootDirectory},
+	crypto::{self, MasterKey, MasterKeys, RSAKeyPair, SymmetricKey},
+	fs::{ChildDirectory, Directory, EncryptedChildDirectory, FileInfo, RootDirectory},
 };
 
 pub mod types;
 use types::*;
+
+pub const FILEN_HOSTS: &[&str] = &[
+	"egest.filen.io",
+	"egest.filen.net",
+	"egest.filen-1.net",
+	"egest.filen-2.net",
+	"egest.filen-3.net",
+	"egest.filen-4.net",
+	"egest.filen-5.net",
+	"egest.filen-6.net",
+];
+
+const CHUNK_SIZE: u64 = 1024 * 1024;
 
 fn build_get_auth_request(
 	client: &reqwest::Client,
@@ -132,7 +150,7 @@ impl AuthorizedClient {
 			&api_key,
 		)
 		.json(&MasterKeysRequest {
-			master_key: master_key.as_str(),
+			master_key: master_key.as_ref(),
 		})
 		.send()
 		.await?;
@@ -174,7 +192,7 @@ impl AuthorizedClient {
 	pub async fn list_dir_contents(
 		&self,
 		dir: &impl Directory,
-	) -> Result<(Vec<File>, Vec<ChildDirectory>)> {
+	) -> Result<(Vec<FileInfo>, Vec<ChildDirectory>)> {
 		let response = self
 			.build_post_auth_request("https://gateway.filen.io/v3/dir/content")
 			.json(&DirContentRequest::from(dir))
@@ -189,7 +207,7 @@ impl AuthorizedClient {
 			response_data
 				.files
 				.into_iter()
-				.map(|file| File::from_encrypted(file, &self.master_keys))
+				.map(|file| FileInfo::from_encrypted(file, &self.master_keys))
 				.collect::<Result<Vec<_>>>()?,
 			response_data
 				.dirs
@@ -197,6 +215,43 @@ impl AuthorizedClient {
 				.map(|dir| ChildDirectory::from_encrypted(dir, &self.master_keys))
 				.collect::<Result<Vec<_>>>()?,
 		))
+	}
+
+	pub async fn download_chunk(&self, file_info: &FileInfo, chunk_idx: u64) -> Result<Vec<u8>> {
+		let url = format!(
+			"https://{}/{}/{}/{}/{}",
+			FILEN_HOSTS[fastrand::usize(..FILEN_HOSTS.len())],
+			file_info.get_region(),
+			file_info.get_bucket(),
+			file_info.get_uuid(),
+			chunk_idx
+		);
+		let response = self.build_get_auth_request(&url).send().await?;
+		if !response.status().is_success() {
+			return Err(anyhow::anyhow!(
+				"Failed to download chunk {:?}",
+				response.text().await?
+			));
+		}
+		let mut data: Vec<u8> = response.bytes().await?.into();
+		file_info.get_key().decrypt_data(&mut data)?;
+		Ok(data)
+	}
+
+	pub async fn download_file<W: Write + Seek>(
+		&self,
+		file_info: &FileInfo,
+		writer: &mut W,
+	) -> Result<()> {
+		let mut futures = FuturesUnordered::new();
+		for i in 0..file_info.get_chunks() {
+			futures.push(async move { (i, self.download_chunk(file_info, i).await) });
+		}
+		while let Some((i, chunk)) = futures.next().await {
+			writer.seek(std::io::SeekFrom::Start(i * CHUNK_SIZE))?;
+			writer.write_all(&chunk?)?;
+		}
+		Ok(())
 	}
 }
 
