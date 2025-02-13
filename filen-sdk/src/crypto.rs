@@ -1,3 +1,4 @@
+use core::str;
 use std::{cell::RefCell, str::FromStr};
 
 use aes_gcm::{aead::AeadInPlace, Aes256Gcm, Nonce};
@@ -9,7 +10,7 @@ use rsa::{
 	pkcs1::{DecodeRsaPrivateKey, DecodeRsaPublicKey},
 	pkcs8::{DecodePrivateKey, DecodePublicKey},
 };
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha512};
 
 const NONCE_VALUES: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -45,83 +46,27 @@ pub fn generate_password_and_master_key(
 	let password = hex::encode(hasher.finalize());
 	Ok((
 		DerivedPassword(password),
-		MasterKey::from_byte_slice(master_key)?,
+		MasterKey::from_str(&hex::encode(master_key))?,
 	))
 }
 
-type MasterKeyBytes = [u8; 32];
-
-pub struct MasterKey {
-	bytes: MasterKeyBytes,
-	chars: [u8; size_of::<MasterKeyBytes>() * 2],
-	cipher: aes_gcm::AesGcm<aes_gcm::aes::Aes256, generic_array::typenum::U12>,
-	garbage: RefCell<Vec<u8>>,
-}
-
-impl PartialEq for MasterKey {
-	fn eq(&self, other: &Self) -> bool {
-		self.bytes == other.bytes
-	}
-}
-
-impl std::fmt::Debug for MasterKey {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("MasterKey")
-			.field("bytes", &self.bytes)
-			.field("key", &self.as_str())
-			.finish()
-	}
-}
-
-impl MasterKey {
-	fn from_bytes_and_str(bytes: [u8; 32], chars: [u8; 64]) -> Self {
-		let mut transformed = [0; 32];
-		// SAFETY: the key is 32 bytes long and Hmac can be of any length
-		pbkdf2::pbkdf2::<Hmac<Sha512>>(
-			// the fact that I use the string representation of the key here is confusing
-			// but this is how the TS sdk does it
-			&chars,
-			&chars,
-			1,
-			&mut transformed,
-		)
-		.unwrap();
-
-		let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&transformed);
-		let cipher = <aes_gcm::Aes256Gcm as aes_gcm::KeyInit>::new(key);
-
-		Self {
-			bytes,
-			chars,
-			cipher,
-			garbage: RefCell::new(Vec::new()),
-		}
-	}
-
-	pub fn from_bytes(bytes: MasterKeyBytes) -> Self {
-		let mut output = [0; size_of::<MasterKeyBytes>() * 2];
-		// SAFETY: The hex crate needs 2x the length of bytes, which is 64
-		hex::encode_to_slice(bytes, &mut output).unwrap();
-		Self::from_bytes_and_str(bytes, output)
-	}
-
-	pub fn from_byte_slice(bytes: &[u8]) -> Result<Self> {
-		Ok(Self::from_bytes(bytes.try_into()?))
-	}
-
-	pub fn as_str(&self) -> &str {
-		// SAFETY: the key is 64 bytes long and is guaranteed to be valid UTF-8
-		unsafe { std::str::from_utf8_unchecked(&self.chars) }
-	}
-
-	pub fn get_cipher(&self) -> &aes_gcm::AesGcm<aes_gcm::aes::Aes256, U12> {
-		&self.cipher
-	}
+pub trait SymmetricKey: FromStr + AsRef<str> + std::fmt::Debug {
+	fn get_cipher(&self) -> &aes_gcm::AesGcm<aes_gcm::aes::Aes256, U12>;
 
 	fn encrypt_split_data(&self, nonce: &Nonce<U12>, data: &mut Vec<u8>) -> Result<()> {
 		self.get_cipher()
 			.encrypt_in_place(nonce, b"", data)
 			.map_err(|e| anyhow!("Encryption failed: {:?}", e))?;
+		Ok(())
+	}
+
+	fn encrypt_data(&self, data: &mut Vec<u8>) -> Result<()> {
+		let nonce = make_insecure_nonce()?;
+		self.encrypt_split_data(&nonce, data)?;
+		let original_len = data.len();
+		data.extend_from_within(original_len - 12..);
+		data.copy_within(0..original_len - 12, 12);
+		data[..12].copy_from_slice(&nonce);
 		Ok(())
 	}
 
@@ -132,17 +77,7 @@ impl MasterKey {
 		Ok(())
 	}
 
-	pub fn encrypt_data(&self, data: &mut Vec<u8>) -> Result<()> {
-		let nonce = make_insecure_nonce()?;
-		self.encrypt_split_data(&nonce, data)?;
-		let original_len = data.len();
-		data.extend_from_within(original_len - 12..);
-		data.copy_within(0..original_len - 12, 12);
-		data[..12].copy_from_slice(&nonce);
-		Ok(())
-	}
-
-	pub fn decrypt_data(&self, data: &mut Vec<u8>) -> Result<()> {
+	fn decrypt_data(&self, data: &mut Vec<u8>) -> Result<()> {
 		// not super happy with this approach, I think this has an unnecessary allocation
 		let nonce = Nonce::clone_from_slice(&data[..12]);
 		data.copy_within(12.., 0);
@@ -150,7 +85,114 @@ impl MasterKey {
 		self.decrypt_split_data(&nonce, data)?;
 		Ok(())
 	}
+}
 
+pub struct BasicKey<const N: usize> {
+	chars: [u8; N],
+	cipher: aes_gcm::AesGcm<aes_gcm::aes::Aes256, generic_array::typenum::U12>,
+}
+
+impl<const N: usize> PartialEq for BasicKey<N> {
+	fn eq(&self, other: &Self) -> bool {
+		self.chars == other.chars
+	}
+}
+
+impl<const N: usize> std::fmt::Debug for BasicKey<N> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("SymmetricKey")
+			.field("key", &self.as_ref())
+			.finish()
+	}
+}
+
+impl<'de, const N: usize> Deserialize<'de> for BasicKey<N> {
+	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+	where
+		D: Deserializer<'de>,
+	{
+		Self::from_str(&String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+	}
+}
+
+impl<const N: usize> FromStr for BasicKey<N> {
+	type Err = anyhow::Error;
+
+	fn from_str(key: &str) -> std::result::Result<Self, Self::Err> {
+		let chars = std::convert::TryInto::<[u8; N]>::try_into(key.as_bytes())
+			.map_err(|e| anyhow!("Invalid key length for BasicKey {}", e))?;
+		// wish I could do this at compile time but const generics are MVP
+		let transformed: [u8; 32] = match N {
+			32 => unsafe { *(&chars as *const [u8; N] as *const [u8; 32]) }, // SAFETY: being in this branch means N == 32,
+			64 => {
+				let mut transformed = [0; 32];
+				// SAFETY: the key is 32 bytes long and Hmac can be of any length
+				pbkdf2::pbkdf2::<Hmac<Sha512>>(
+					// the fact that I use the string representation of the key here is confusing
+					// but this is how the TS sdk does it
+					&chars,
+					&chars,
+					1,
+					&mut transformed,
+				)
+				.unwrap();
+				transformed
+			}
+			_ => return Err(anyhow!("Unsupported key length")),
+		};
+
+		let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&transformed);
+		let cipher = <aes_gcm::Aes256Gcm as aes_gcm::KeyInit>::new(key);
+
+		Ok(Self { chars, cipher })
+	}
+}
+
+impl<const N: usize> AsRef<str> for BasicKey<N> {
+	fn as_ref(&self) -> &str {
+		// SAFETY: the key is 64 bytes long and is guaranteed to be valid UTF-8
+		unsafe { std::str::from_utf8_unchecked(&self.chars) }
+	}
+}
+
+impl<const N: usize> SymmetricKey for BasicKey<N> {
+	fn get_cipher(&self) -> &aes_gcm::AesGcm<aes_gcm::aes::Aes256, U12> {
+		&self.cipher
+	}
+}
+
+pub struct MasterKey {
+	key: BasicKey<64>,
+	garbage: RefCell<Vec<u8>>,
+}
+
+impl PartialEq for MasterKey {
+	fn eq(&self, other: &Self) -> bool {
+		self.key == other.key
+	}
+}
+
+impl std::fmt::Debug for MasterKey {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("MasterKey")
+			.field("key", &self.as_ref())
+			.finish()
+	}
+}
+
+impl AsRef<str> for MasterKey {
+	fn as_ref(&self) -> &str {
+		self.key.as_ref()
+	}
+}
+
+impl SymmetricKey for MasterKey {
+	fn get_cipher(&self) -> &aes_gcm::AesGcm<aes_gcm::aes::Aes256, U12> {
+		self.key.get_cipher()
+	}
+}
+
+impl MasterKey {
 	pub fn encrypt_metadata(&self, metadata: &str, out_string: &mut String) -> Result<()> {
 		out_string.clear();
 		out_string.push_str("002");
@@ -195,13 +237,10 @@ impl FromStr for MasterKey {
 	type Err = anyhow::Error;
 
 	fn from_str(key: &str) -> Result<Self> {
-		Ok(Self::from_bytes_and_str(
-			hex::decode(key)?
-				.try_into()
-				.map_err(|_| anyhow!("Invalid key length"))?,
-			std::convert::TryInto::<[u8; 64]>::try_into(key.as_bytes())
-				.map_err(|_| anyhow!("Invalid key length"))?,
-		))
+		Ok(Self {
+			key: BasicKey::from_str(key)?,
+			garbage: RefCell::new(Vec::new()),
+		})
 	}
 }
 
@@ -232,11 +271,19 @@ impl MasterKeys {
 	) -> Result<()> {
 		for key in &self.keys {
 			if key.decrypt_metadata(encrypted_metadata, out_string).is_ok() {
-				println!("Decrypted with key: {:?}", key.as_str());
 				return Ok(());
 			}
 		}
 		Err(anyhow!("Failed to decrypt metadata"))
+	}
+
+	pub fn decrypt_data(&self, data: &mut Vec<u8>) -> Result<()> {
+		for key in &self.keys {
+			if key.decrypt_data(data).is_ok() {
+				return Ok(());
+			}
+		}
+		Err(anyhow!("Failed to decrypt data"))
 	}
 }
 
@@ -282,7 +329,7 @@ mod tests {
 				.unwrap()
 				.keys
 				.iter()
-				.map(MasterKey::as_str)
+				.map(MasterKey::as_ref)
 				.collect::<Vec<_>>(),
 			[
 				"ba8409ed0356864c08237f55bbeb4307869b03633cfa59219849d5b316abb06b",

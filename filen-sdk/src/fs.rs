@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::crypto::MasterKeys;
+use crate::crypto::{BasicKey, MasterKeys};
 
 pub trait Directory {
 	fn get_uuid(&self) -> Uuid;
